@@ -1,0 +1,125 @@
+import numpy as np
+import pandas as pd
+import random
+
+class DistributionEngine:
+    def __init__(self):
+        pass
+
+    def distribute_slab(self, target_total_taxable, hsn_list):
+        """
+        Distributes a target taxable amount across a list of HSN objects.
+        
+        Args:
+            target_total_taxable (float): The total amount to distribute.
+            hsn_list (list): List of dicts [{'hsn':..., 'weight':..., 'min_price':..., 'max_price':...}]
+        
+        Returns:
+            pd.DataFrame: DataFrame containing the distributed data.
+        """
+        if not hsn_list or target_total_taxable <= 0:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(hsn_list)
+        
+        # --- NEW RANDOMNESS LOGIC ---
+        # 1. Apply Random Jitter to Weights
+        # Even if weights are same (e.g., 5 and 5), we multiply them by a random factor 
+        # between 0.8 and 1.2 (±20% variance).
+        # This ensures taxable values are never identical for same-weight items.
+        df['random_factor'] = np.random.uniform(0.8, 1.2, size=len(df))
+        df['effective_weight'] = df['weight'] * df['random_factor']
+        
+        # 2. Normalize based on EFFECTIVE weight (not raw weight)
+        total_weight = df['effective_weight'].sum()
+        if total_weight == 0:
+            # If ALL weights are 0, distribute equally (fallback)
+            # OR could be 0, but usually if user enters value they want it distributed
+            df['share'] = 1 / len(df)
+        else:
+            df['share'] = df['effective_weight'] / total_weight
+        
+        # 3. Allocate Initial Taxable Value
+        df['allocated_taxable'] = df['share'] * target_total_taxable
+        
+        # 4. Generate Random QTY
+        # We derive QTY from allocated taxable and a random unit price
+        def calculate_qty(row):
+            # If allocated taxable is effectively 0 (due to 0 weight), return 0 qty
+            if row['allocated_taxable'] <= 0.01:
+                return 0
+
+            # Ensure price range is valid
+            min_p = max(1, row.get('min_price', 10))
+            max_p = max(min_p, row.get('max_price', 100))
+            
+            # Random unit price within range
+            unit_price = random.uniform(min_p, max_p)
+            
+            # Calculate raw QTY
+            raw_qty = row['allocated_taxable'] / unit_price
+            
+            # Round to nearest integer, ensuring at least 1 if taxable > 0
+            qty = max(1, int(round(raw_qty)))
+            return qty
+
+        df['qty'] = df.apply(calculate_qty, axis=1)
+        
+        # 5. Recalculate Taxable to maintain integrity
+        # We keep the allocated_taxable as the primary driver to respect the total closely,
+        # but we must round it.
+        df['final_taxable'] = df['allocated_taxable'].round(2)
+        
+        # 6. Final Balancing
+        # The sum of rounded values might differ slightly from target_total_taxable
+        current_sum = df['final_taxable'].sum()
+        diff = target_total_taxable - current_sum
+        
+        # Apply difference to a random item (weighted by size) so it doesn't look obvious
+        # Only apply diff to items that actually have weight/value
+        if abs(diff) > 0.001:
+            # Filter for items that have >0 weight to absorb the diff
+            valid_indices = df[df['effective_weight'] > 0].index
+            if not valid_indices.empty:
+                idx_to_adjust = df.loc[valid_indices, 'effective_weight'].idxmax()
+                df.loc[idx_to_adjust, 'final_taxable'] += diff
+            elif total_weight == 0:
+                # Fallback if all weights are 0
+                idx_to_adjust = df.index[0]
+                df.loc[idx_to_adjust, 'final_taxable'] += diff
+            
+        # Ensure final taxable is strictly 2 decimal places
+        df['final_taxable'] = df['final_taxable'].round(2)
+        
+        # 7. Calculate Taxes
+        # Ensure gst_rate is float for calculation
+        df['gst_rate'] = df['gst_rate'].astype(float)
+        
+        df['cgst_amt'] = (df['final_taxable'] * (df['gst_rate'] / 100) / 2).round(2)
+        df['sgst_amt'] = (df['final_taxable'] * (df['gst_rate'] / 100) / 2).round(2)
+        df['total_value'] = (df['final_taxable'] + df['cgst_amt'] + df['sgst_amt']).round(2)
+        
+        return df
+
+    def process_b2b(self, b2b_entries):
+        """
+        Process manual B2B entries.
+        """
+        if not b2b_entries:
+            return pd.DataFrame()
+            
+        df = pd.DataFrame(b2b_entries)
+        
+        # Ensure types
+        df['qty'] = df['qty'].astype(int)
+        df['taxable_value'] = df['taxable_value'].astype(float)
+        df['gst_rate'] = df['gst_rate'].astype(float)
+        
+        # Calcs
+        df['final_taxable'] = df['taxable_value'].round(2)
+        df['cgst_amt'] = (df['final_taxable'] * (df['gst_rate'] / 100) / 2).round(2)
+        df['sgst_amt'] = (df['final_taxable'] * (df['gst_rate'] / 100) / 2).round(2)
+        df['total_value'] = (df['final_taxable'] + df['cgst_amt'] + df['sgst_amt']).round(2)
+        
+
+        return df
