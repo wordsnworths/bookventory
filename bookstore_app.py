@@ -165,13 +165,18 @@ def fetch_book_metadata(isbn):
     1. Try Google Books API.
     2. If fails/empty, Try Open Library API.
     """
-    isbn = str(isbn).strip().replace("-", "")
-    headers = {'User-Agent': 'BookstoreApp/1.0'}
+    clean_isbn = str(isbn).strip().replace("-", "")
+    # Use a browser-like User-Agent to avoid basic blocking
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
     
     # --- Attempt 1: Google Books ---
-    google_url = f"https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}"
     try:
-        response = requests.get(google_url, headers=headers, timeout=5)
+        # Try exact ISBN search
+        url = f"https://www.googleapis.com/books/v1/volumes?q=isbn:{clean_isbn}"
+        response = requests.get(url, headers=headers, timeout=10)
+        
         if response.status_code == 200:
             data = response.json()
             if "items" in data and len(data["items"]) > 0:
@@ -188,15 +193,15 @@ def fetch_book_metadata(isbn):
                     "cover_url": info.get("imageLinks", {}).get("thumbnail", "")
                 }
     except Exception:
-        pass # Silently fail to try next source
+        pass 
 
     # --- Attempt 2: Open Library ---
-    ol_url = f"https://openlibrary.org/api/books?bibkeys=ISBN:{isbn}&jscmd=data&format=json"
     try:
-        response = requests.get(ol_url, headers=headers, timeout=5)
+        url = f"https://openlibrary.org/api/books?bibkeys=ISBN:{clean_isbn}&jscmd=data&format=json"
+        response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
             data = response.json()
-            key = f"ISBN:{isbn}"
+            key = f"ISBN:{clean_isbn}"
             if key in data:
                 info = data[key]
                 authors = ", ".join([a['name'] for a in info.get('authors', [{'name': 'Unknown'}])])
@@ -206,7 +211,7 @@ def fetch_book_metadata(isbn):
                     "title": info.get("title", "Unknown"),
                     "author": authors,
                     "publisher": publishers,
-                    "description": "Fetched via Open Library", # OL descriptions are complex to parse in this endpoint
+                    "description": "Fetched via Open Library",
                     "genre": "Unknown",
                     "cover_url": info.get("cover", {}).get("medium", "")
                 }
