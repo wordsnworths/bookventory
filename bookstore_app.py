@@ -156,29 +156,63 @@ class DBManager:
 db = DBManager()
 
 # ==========================================
-# 3. HELPER FUNCTIONS
+# 3. HELPER FUNCTIONS (API UPDATED)
 # ==========================================
 def fetch_book_metadata(isbn):
-    url = f"https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}"
+    """
+    Fetches book metadata. 
+    Strategy: 
+    1. Try Google Books API.
+    2. If fails/empty, Try Open Library API.
+    """
+    isbn = str(isbn).strip().replace("-", "")
+    headers = {'User-Agent': 'BookstoreApp/1.0'}
+    
+    # --- Attempt 1: Google Books ---
+    google_url = f"https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}"
     try:
-        response = requests.get(url)
-        data = response.json()
-        if "items" in data:
-            info = data["items"][0]["volumeInfo"]
-            # Extract categories (genre)
-            categories = info.get("categories", [])
-            genre = ", ".join(categories) if categories else "Unknown"
-            
-            return {
-                "title": info.get("title", "Unknown"),
-                "author": ", ".join(info.get("authors", ["Unknown"])),
-                "publisher": info.get("publisher", "Unknown"),
-                "description": info.get("description", ""),
-                "genre": genre,
-                "cover_url": info.get("imageLinks", {}).get("thumbnail", "")
-            }
-    except:
-        return None
+        response = requests.get(google_url, headers=headers, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if "items" in data and len(data["items"]) > 0:
+                info = data["items"][0]["volumeInfo"]
+                categories = info.get("categories", [])
+                genre = ", ".join(categories) if categories else "Unknown"
+                
+                return {
+                    "title": info.get("title", "Unknown"),
+                    "author": ", ".join(info.get("authors", ["Unknown"])),
+                    "publisher": info.get("publisher", "Unknown"),
+                    "description": info.get("description", ""),
+                    "genre": genre,
+                    "cover_url": info.get("imageLinks", {}).get("thumbnail", "")
+                }
+    except Exception:
+        pass # Silently fail to try next source
+
+    # --- Attempt 2: Open Library ---
+    ol_url = f"https://openlibrary.org/api/books?bibkeys=ISBN:{isbn}&jscmd=data&format=json"
+    try:
+        response = requests.get(ol_url, headers=headers, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            key = f"ISBN:{isbn}"
+            if key in data:
+                info = data[key]
+                authors = ", ".join([a['name'] for a in info.get('authors', [{'name': 'Unknown'}])])
+                publishers = ", ".join([p['name'] for p in info.get('publishers', [{'name': 'Unknown'}])])
+                
+                return {
+                    "title": info.get("title", "Unknown"),
+                    "author": authors,
+                    "publisher": publishers,
+                    "description": "Fetched via Open Library", # OL descriptions are complex to parse in this endpoint
+                    "genre": "Unknown",
+                    "cover_url": info.get("cover", {}).get("medium", "")
+                }
+    except Exception:
+        pass
+
     return None
 
 def calculate_status(row):
@@ -817,4 +851,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
