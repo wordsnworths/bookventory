@@ -173,16 +173,15 @@ def fetch_book_metadata(isbn):
     
     # --- Attempt 1: Google Books ---
     try:
-        # Try exact ISBN search
         url = f"https://www.googleapis.com/books/v1/volumes?q=isbn:{clean_isbn}"
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=5)
         
         if response.status_code == 200:
             data = response.json()
             if "items" in data and len(data["items"]) > 0:
                 info = data["items"][0]["volumeInfo"]
                 categories = info.get("categories", [])
-                genre = ", ".join(categories) if categories else "Unknown"
+                genre = ", ".join(categories) if categories else ""
                 
                 return {
                     "title": info.get("title", "Unknown"),
@@ -198,7 +197,7 @@ def fetch_book_metadata(isbn):
     # --- Attempt 2: Open Library ---
     try:
         url = f"https://openlibrary.org/api/books?bibkeys=ISBN:{clean_isbn}&jscmd=data&format=json"
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=5)
         if response.status_code == 200:
             data = response.json()
             key = f"ISBN:{clean_isbn}"
@@ -207,12 +206,17 @@ def fetch_book_metadata(isbn):
                 authors = ", ".join([a['name'] for a in info.get('authors', [{'name': 'Unknown'}])])
                 publishers = ", ".join([p['name'] for p in info.get('publishers', [{'name': 'Unknown'}])])
                 
+                # Try to get subjects for genre
+                subjects = info.get('subjects', [])
+                genre_list = [s['name'] for s in subjects[:3]] # Get top 3 subjects
+                genre = ", ".join(genre_list)
+                
                 return {
                     "title": info.get("title", "Unknown"),
                     "author": authors,
                     "publisher": publishers,
-                    "description": "Fetched via Open Library",
-                    "genre": "Unknown",
+                    "description": f"Published by {publishers}", # OL description is complex, using publisher as fallback summary
+                    "genre": genre,
                     "cover_url": info.get("cover", {}).get("medium", "")
                 }
     except Exception:
@@ -353,21 +357,32 @@ def render_inventory():
                 else: st.warning("Not found")
         
         meta = st.session_state.get('new_meta', {})
-        with st.form("add_book"):
-            title = st.text_input("Title", value=meta.get('title', ''))
-            author = st.text_input("Author", value=meta.get('author', ''))
-            genre = st.text_input("Genre", value=meta.get('genre', ''))
-            summary = st.text_area("Summary", value=meta.get('description', ''))
-            dist = st.selectbox("Distributor", options=list(dist_map.keys()))
-            mrp = st.number_input("MRP", 0.0)
-            stock = st.number_input("Stock", 0)
-            shelf = st.text_input("Shelf Location")
-            
-            if st.form_submit_button("Save Book"):
-                if title and dist:
-                    db.execute("INSERT INTO books (isbn, title, author, genre, summary, mrp, stock, shelf_location, distributor_id, cover_url, purchase_date) VALUES (?,?,?,?,?,?,?,?,?,?,?)", 
-                               (isbn_in, title, author, genre, summary, mrp, stock, shelf, dist_map[dist], meta.get('cover_url', ''), datetime.date.today()))
-                    st.success("Saved!")
+        
+        # Check if at least one distributor exists
+        if not dist_map:
+            st.error("⚠️ No Distributors Found! Please go to the 'Distributors' tab and add at least one distributor before adding books.")
+        else:
+            with st.form("add_book"):
+                title = st.text_input("Title", value=meta.get('title', ''))
+                author = st.text_input("Author", value=meta.get('author', ''))
+                genre = st.text_input("Genre", value=meta.get('genre', ''))
+                summary = st.text_area("Summary", value=meta.get('description', ''))
+                dist = st.selectbox("Distributor", options=list(dist_map.keys()))
+                mrp = st.number_input("MRP", 0.0)
+                stock = st.number_input("Stock", 0)
+                shelf = st.text_input("Shelf Location")
+                
+                # Hidden field to keep ISBN persistent if passed from outside
+                f_isbn = isbn_in if isbn_in else ""
+                
+                if st.form_submit_button("Save Book"):
+                    if title and dist and f_isbn:
+                        # Use REPLACE to handle updates/duplicates gracefully
+                        db.execute("INSERT OR REPLACE INTO books (isbn, title, author, genre, summary, mrp, stock, shelf_location, distributor_id, cover_url, purchase_date) VALUES (?,?,?,?,?,?,?,?,?,?,?)", 
+                                   (f_isbn, title, author, genre, summary, mrp, stock, shelf, dist_map[dist], meta.get('cover_url', ''), datetime.date.today()))
+                        st.success("Saved!")
+                    else:
+                        st.error("Error: ISBN, Title, and Distributor are required.")
         
         st.markdown("---")
         st.subheader("Bulk Import Books")
