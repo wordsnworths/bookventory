@@ -156,7 +156,7 @@ class DBManager:
 db = DBManager()
 
 # ==========================================
-# 3. HELPER FUNCTIONS (API UPDATED)
+# 3. HELPER FUNCTIONS
 # ==========================================
 def fetch_book_metadata(isbn):
     """
@@ -166,7 +166,6 @@ def fetch_book_metadata(isbn):
     2. If fails/empty, Try Open Library API.
     """
     clean_isbn = str(isbn).strip().replace("-", "")
-    # Use a browser-like User-Agent to avoid basic blocking
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
@@ -206,16 +205,15 @@ def fetch_book_metadata(isbn):
                 authors = ", ".join([a['name'] for a in info.get('authors', [{'name': 'Unknown'}])])
                 publishers = ", ".join([p['name'] for p in info.get('publishers', [{'name': 'Unknown'}])])
                 
-                # Try to get subjects for genre
                 subjects = info.get('subjects', [])
-                genre_list = [s['name'] for s in subjects[:3]] # Get top 3 subjects
+                genre_list = [s['name'] for s in subjects[:3]] 
                 genre = ", ".join(genre_list)
                 
                 return {
                     "title": info.get("title", "Unknown"),
                     "author": authors,
                     "publisher": publishers,
-                    "description": f"Published by {publishers}", # OL description is complex, using publisher as fallback summary
+                    "description": f"Published by {publishers}",
                     "genre": genre,
                     "cover_url": info.get("cover", {}).get("medium", "")
                 }
@@ -226,8 +224,6 @@ def fetch_book_metadata(isbn):
 
 def calculate_status(row):
     status_badges = []
-    
-    # Safety: ensure stock is treated as int
     try:
         stock_val = int(row['stock'])
     except:
@@ -238,7 +234,6 @@ def calculate_status(row):
     elif stock_val < 3:
         status_badges.append('<span class="status-badge badge-warning">Low Stock</span>')
     
-    # Simple bestseller logic
     sales = row.get('total_sales')
     if sales and sales >= 5:
         status_badges.append('<span class="status-badge badge-success">Bestseller</span>')
@@ -254,7 +249,6 @@ def render_dashboard():
     st.title("Dashboard")
     col1, col2, col3, col4 = st.columns(4)
     
-    # Safety: Coerce queries to numeric to prevent sum/count errors
     total_books = db.query("SELECT COUNT(*) as c FROM books")['c'][0]
     total_stock = db.query("SELECT SUM(CAST(stock AS INTEGER)) as c FROM books")['c'][0]
     low_stock = db.query("SELECT COUNT(*) as c FROM books WHERE CAST(stock AS INTEGER) < 3 AND CAST(stock AS INTEGER) > 0")['c'][0]
@@ -269,16 +263,14 @@ def render_dashboard():
     st.subheader("Sales Trend (Last 30 Days)")
     sales_data = db.query("SELECT sale_date, SUM(qty) as total_qty FROM sales WHERE sale_date >= date('now', '-30 days') GROUP BY sale_date ORDER BY sale_date ASC")
     if not sales_data.empty:
-        # Date Formatting: Ensure it is string format YYYY-MM-DD to hide time
         sales_data['sale_date'] = pd.to_datetime(sales_data['sale_date']).dt.strftime('%Y-%m-%d')
         fig = px.bar(sales_data, x='sale_date', y='total_qty', template="plotly_dark")
-        # Force X-axis to be categorical to remove timestamps absolutely
         fig.update_xaxes(type='category')
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("No sales data recorded recently.")
 
-# --- INVENTORY ---
+# --- INVENTORY (OPTIMIZED WITH PAGINATION) ---
 def render_inventory():
     st.title("Inventory Management")
     tab1, tab2 = st.tabs(["Search & Edit", "Add New Book"])
@@ -287,7 +279,13 @@ def render_inventory():
     dist_map = dict(zip(distributors['name'], distributors['id'])) if not distributors.empty else {}
 
     with tab1:
-        # Real-time search logic
+        # Initialize pagination state
+        if 'page' not in st.session_state:
+            st.session_state.page = 0
+        
+        PAGE_SIZE = 50
+
+        # Search Bar
         label = "Search Inventory (ISBN, Title)"
         if st_keyup:
             search = st_keyup(label, placeholder="Type to filter (Real-time)", key="inv_search", debounce=300)
@@ -295,15 +293,34 @@ def render_inventory():
             search = st.text_input(label, placeholder="Type to search (Press Enter)", key="inv_search")
             st.caption("ℹ️ Install `streamlit-keyup` in terminal (`pip install streamlit-keyup`) for instant search-as-you-type.")
 
-        base_query = "SELECT b.*, d.name as distributor_name, (SELECT SUM(qty) FROM sales WHERE isbn = b.isbn) as total_sales FROM books b LEFT JOIN distributors d ON b.distributor_id = d.id"
+        # Query Construction
+        base_query = """
+            SELECT b.*, d.name as distributor_name, 
+            (SELECT SUM(qty) FROM sales WHERE isbn = b.isbn) as total_sales
+            FROM books b 
+            LEFT JOIN distributors d ON b.distributor_id = d.id
+        """
         
         if search:
-            df = db.query(f"{base_query} WHERE b.isbn LIKE ? OR b.title LIKE ?", (f'%{search}%', f'%{search}%'))
+            # If searching, show all matches (usually small number)
+            query = f"{base_query} WHERE b.isbn LIKE ? OR b.title LIKE ?"
+            df = db.query(query, (f'%{search}%', f'%{search}%'))
+            # Reset page when searching
+            st.session_state.page = 0
         else:
-            df = db.query(base_query)
-        
+            # If NOT searching, use Pagination (LIMIT/OFFSET)
+            offset = st.session_state.page * PAGE_SIZE
+            query = f"{base_query} ORDER BY b.added_at DESC LIMIT {PAGE_SIZE} OFFSET {offset}"
+            df = db.query(query)
+
+        # Count Total for Pagination Controls (Only if not searching)
+        total_rows = 0
+        if not search:
+            total_rows = db.query("SELECT COUNT(*) as c FROM books")['c'][0]
+
+        # Display Logic
         if not df.empty:
-            # BUG FIX: Force stock to integer to prevent 'bytes' vs 'int' error
+            # Force stock to int
             df['stock'] = pd.to_numeric(df['stock'], errors='coerce').fillna(0).astype(int)
             
             for _, row in df.iterrows():
@@ -320,9 +337,7 @@ def render_inventory():
                                 st.caption(row['summary'])
                         st.markdown(calculate_status(row), unsafe_allow_html=True)
                     with c3:
-                        # Edit Form
                         with st.form(f"edit_{row['isbn']}"):
-                            st.write("**Edit Details**")
                             n_stock = st.number_input("Stock", value=int(row['stock']), key=f"s_{row['isbn']}")
                             n_shelf = st.text_input("Shelf", value=row['shelf_location'], key=f"sh_{row['isbn']}")
                             
@@ -337,7 +352,6 @@ def render_inventory():
                                     st.warning(f"Deleted {row['title']}")
                                     st.rerun()
                         
-                        # Add to Cart Button (Outside form)
                         if st.button("Add to Order Cart", key=f"cart_{row['isbn']}"):
                             if 'cart' not in st.session_state: st.session_state.cart = {}
                             st.session_state.cart[row['isbn']] = {
@@ -345,6 +359,29 @@ def render_inventory():
                                 'distributor': row['distributor_name'], 'qty': st.session_state.cart.get(row['isbn'], {}).get('qty', 0) + 1
                             }
                             st.success("Added to cart")
+            
+            # Pagination Controls
+            if not search and total_rows > PAGE_SIZE:
+                st.markdown("---")
+                col_p1, col_p2, col_p3 = st.columns([1, 2, 1])
+                with col_p1:
+                    if st.session_state.page > 0:
+                        if st.button("Previous Page"):
+                            st.session_state.page -= 1
+                            st.rerun()
+                with col_p2:
+                    st.write(f"Page {st.session_state.page + 1} of {(total_rows // PAGE_SIZE) + 1}")
+                with col_p3:
+                    if (st.session_state.page + 1) * PAGE_SIZE < total_rows:
+                        if st.button("Next Page"):
+                            st.session_state.page += 1
+                            st.rerun()
+
+        else:
+            if search:
+                st.info("No books found matching your search.")
+            else:
+                st.info("Inventory is empty. Add books in the next tab.")
 
     with tab2:
         st.subheader("Single Entry")
@@ -358,7 +395,6 @@ def render_inventory():
         
         meta = st.session_state.get('new_meta', {})
         
-        # Check if at least one distributor exists
         if not dist_map:
             st.error("⚠️ No Distributors Found! Please go to the 'Distributors' tab and add at least one distributor before adding books.")
         else:
@@ -371,13 +407,10 @@ def render_inventory():
                 mrp = st.number_input("MRP", 0.0)
                 stock = st.number_input("Stock", 0)
                 shelf = st.text_input("Shelf Location")
-                
-                # Hidden field to keep ISBN persistent if passed from outside
                 f_isbn = isbn_in if isbn_in else ""
                 
                 if st.form_submit_button("Save Book"):
                     if title and dist and f_isbn:
-                        # Use REPLACE to handle updates/duplicates gracefully
                         db.execute("INSERT OR REPLACE INTO books (isbn, title, author, genre, summary, mrp, stock, shelf_location, distributor_id, cover_url, purchase_date) VALUES (?,?,?,?,?,?,?,?,?,?,?)", 
                                    (f_isbn, title, author, genre, summary, mrp, stock, shelf, dist_map[dist], meta.get('cover_url', ''), datetime.date.today()))
                         st.success("Saved!")
@@ -387,7 +420,7 @@ def render_inventory():
         st.markdown("---")
         st.subheader("Bulk Import Books")
         st.info("Upload CSV/Excel with columns: `ISBN`. Optional: `Stock`, `Shelf`, `Distributor`.")
-        st.markdown("**Note:** If Title/Author are missing, the system will try to auto-fetch them from the web. This may take a few seconds per book.")
+        st.markdown("**Note:** If Title/Author are missing, the system will try to auto-fetch them from the web.")
         
         bulk_file = st.file_uploader("Upload Books File", type=['csv', 'xlsx'], key="bulk_book_upload")
         
@@ -406,13 +439,10 @@ def render_inventory():
                 status_text = st.empty()
                 
                 for idx, row in df_bulk.iterrows():
-                    # Update progress
                     progress_bar.progress(min((idx + 1) / total_rows, 1.0))
-                    
                     b_isbn = str(row.get('isbn', '')).strip()
                     if not b_isbn: continue
                     
-                    # Check if metadata is provided in file
                     has_title = 'title' in row and pd.notna(row['title']) and str(row['title']).strip() != ''
                     has_author = 'author' in row and pd.notna(row['author']) and str(row['author']).strip() != ''
                     
@@ -422,7 +452,6 @@ def render_inventory():
                     b_summary = row.get('summary', '')
                     b_cover = ''
                     
-                    # Fetch if missing
                     if not b_title or not b_author:
                         status_text.text(f"Fetching metadata for {b_isbn}...")
                         meta = fetch_book_metadata(b_isbn)
@@ -433,7 +462,6 @@ def render_inventory():
                             if not b_summary: b_summary = meta['description']
                             b_cover = meta.get('cover_url', '')
                     
-                    # Fallbacks
                     if not b_title: b_title = f"Unknown Title ({b_isbn})"
                     if not b_author: b_author = "Unknown"
                     if not b_genre: b_genre = "Unknown"
@@ -441,12 +469,9 @@ def render_inventory():
                     b_mrp = row.get('mrp', 0.0)
                     b_stock = row.get('stock', 0)
                     b_shelf = row.get('shelf', '')
-                    
-                    # Resolve distributor
                     b_dist_name = row.get('distributor', '')
                     b_dist_id = dist_map.get(b_dist_name, None)
                     
-                    # Insert or Ignore to prevent duplicates crashing
                     try:
                         db.execute('''INSERT OR IGNORE INTO books 
                         (isbn, title, author, genre, summary, mrp, stock, shelf_location, distributor_id, purchase_date, cover_url)
@@ -465,14 +490,11 @@ def render_inventory():
 # --- DISTRIBUTORS ---
 def render_distributors():
     st.title("Distributor Ecosystem")
-    
-    # Fetch distributors for dropdowns
     dist_df = db.query("SELECT * FROM distributors")
     dist_map = dict(zip(dist_df['name'], dist_df['id'])) if not dist_df.empty else {}
 
     tab1, tab2, tab3, tab4 = st.tabs(["Distributor List (Edit/Delete)", "Add Distributor", "Upload Stock List", "Browse & Order"])
     
-    # 1. List with Edit/Delete
     with tab1:
         if not dist_df.empty:
             for _, row in dist_df.iterrows():
@@ -501,7 +523,6 @@ def render_distributors():
         else:
             st.info("No distributors found.")
     
-    # 2. Add New
     with tab2:
         with st.form("new_dist"):
             st.write("### Add New Distributor")
@@ -516,7 +537,6 @@ def render_distributors():
                 st.success("Added!")
                 st.rerun()
 
-    # 3. Upload Catalog
     with tab3:
         st.subheader("Import Distributor Stock List")
         if not dist_map:
@@ -565,10 +585,8 @@ def render_distributors():
                 except Exception as e:
                     st.error(f"Error processing file: {e}")
 
-    # 4. Browse & Order
     with tab4:
         st.subheader("Order from Distributor Catalogs")
-        # Real-time search logic
         label = "Search Catalog (ISBN, Title, Publisher)"
         if st_keyup:
             search_cat = st_keyup(label, placeholder="Type to filter (Real-time)", key="cat_search", debounce=300)
@@ -595,7 +613,6 @@ def render_distributors():
                     st.caption(f"**Publisher:** {row['publisher']} | **Distributor:** {row['dist_name']}")
                 with col2:
                     st.write(f"**MRP:** {row['mrp']}")
-                    # Highlight stock availability
                     if row['qty_available'] > 0:
                         st.markdown(f"<span style='color:#4caf50; font-weight:bold'>Stock: {row['qty_available']}</span>", unsafe_allow_html=True)
                     else:
@@ -625,7 +642,6 @@ def render_orders():
         st.info("Cart is empty.")
         return
 
-    # Convert cart dict to DataFrame
     cart_data = []
     for isbn, item in st.session_state.cart.items():
         cart_data.append({
@@ -640,7 +656,6 @@ def render_orders():
     if st.button("Generate Distributor Emails & Excel"):
         grouped = edited_df.groupby("Distributor")
         
-        # Pre-fetch distributor emails
         dist_info = db.query("SELECT name, email, email_cc FROM distributors")
         email_map = {}
         if not dist_info.empty:
@@ -651,10 +666,8 @@ def render_orders():
             with st.expander(f"Order for {dist_name}", expanded=True):
                 st.dataframe(group)
                 
-                # Emails
                 d_emails = email_map.get(dist_name, {'to': '', 'cc': ''})
                 
-                # Create Excel
                 output = BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                     group.to_excel(writer, index=False)
@@ -676,19 +689,16 @@ def render_sales_import():
     up = st.file_uploader("Upload Sales Report (CSV/Excel)", type=['csv', 'xlsx'])
     if up:
         try:
-            # Detect file type and read accordingly
             if up.name.endswith('.csv'):
                 df = pd.read_csv(up)
             else:
                 df = pd.read_excel(up)
             
-            # Clean column names
             df.columns = [c.lower().strip() for c in df.columns]
             
             st.write("Preview:", df.head())
             if st.button("Process Sales"):
                 if 'isbn' in df.columns and 'qty' in df.columns:
-                    # Ensure qty is numeric
                     df['qty'] = pd.to_numeric(df['qty'], errors='coerce').fillna(0).astype(int)
                     
                     progress_bar = st.progress(0)
@@ -698,9 +708,7 @@ def render_sales_import():
                         progress_bar.progress(min((idx + 1) / total_sales, 1.0))
                         row_isbn = str(row['isbn']).strip()
                         
-                        # 1. Check if Book exists. If NOT, auto-create it with Stock=0 and fetched metadata
                         if db.query("SELECT 1 FROM books WHERE isbn = ?", (row_isbn,)).empty:
-                            # Auto-fetch metadata
                             meta = fetch_book_metadata(row_isbn)
                             if meta:
                                 new_title = meta['title']
@@ -719,12 +727,9 @@ def render_sales_import():
                                        (row_isbn, new_title, 0, new_author, new_genre, new_summary, new_cover))
                             st.toast(f"ℹ️ Auto-created book entry for ISBN: {row_isbn}")
                         
-                        # 2. Record Sale
                         db.execute("INSERT INTO sales (isbn, qty, sale_date) VALUES (?, ?, ?)", 
                                    (row_isbn, row['qty'], datetime.date.today()))
                         
-                        # 3. Update stock (logic: max(0, curr - qty))
-                        # Since we auto-created with 0 stock, 0 - qty will result in 0 (due to max(0, ...))
                         curr = db.query("SELECT stock FROM books WHERE isbn = ?", (row_isbn,))
                         if not curr.empty:
                             try:
@@ -752,7 +757,6 @@ def render_returns():
     if not df.empty:
         df['due_date'] = pd.to_datetime(df['due_date'])
         df['days_left'] = (df['due_date'] - pd.to_datetime(datetime.date.today())).dt.days
-        # Date Formatting for Display (Hide Time)
         df['due_date'] = df['due_date'].dt.strftime('%Y-%m-%d')
         st.dataframe(df.style.map(lambda x: 'color: red' if x < 0 else 'color: orange' if x < 30 else 'color: white', subset=['days_left']))
     else:
@@ -768,9 +772,7 @@ def render_receiving():
         isbn = st.text_input("Scan ISBN")
         qty = st.number_input("Qty Received", 1)
         if st.button("Add Stock"):
-            # Update single item logic similar to bulk
             if isbn:
-                # 1. Check existence and fetch if needed
                 if db.query("SELECT 1 FROM books WHERE isbn = ?", (isbn,)).empty:
                     meta = fetch_book_metadata(isbn)
                     if meta:
@@ -790,7 +792,6 @@ def render_receiving():
                                 (isbn, new_title, 0, new_author, new_genre, new_summary, new_cover))
                     st.toast(f"ℹ️ Auto-created book entry for ISBN: {isbn}")
                 
-                # 2. Add Stock
                 db.execute("UPDATE books SET stock = stock + ? WHERE isbn = ?", (qty, isbn))
                 st.success("Stock Updated")
             else:
@@ -812,7 +813,6 @@ def render_receiving():
                 df.columns = [c.lower().strip() for c in df.columns]
                 
                 if 'isbn' in df.columns and 'qty' in df.columns:
-                    # Ensure qty is numeric
                     df['qty'] = pd.to_numeric(df['qty'], errors='coerce').fillna(0).astype(int)
                     
                     progress_bar = st.progress(0)
@@ -824,7 +824,6 @@ def render_receiving():
                         row_isbn = str(row['isbn']).strip()
                         if not row_isbn: continue
                         
-                        # 1. Check if Book exists. If NOT, auto-create it with Stock=0 and fetched metadata
                         if db.query("SELECT 1 FROM books WHERE isbn = ?", (row_isbn,)).empty:
                             status_text.text(f"Fetching metadata for new book: {row_isbn}...")
                             meta = fetch_book_metadata(row_isbn)
@@ -844,7 +843,6 @@ def render_receiving():
                             db.execute("INSERT INTO books (isbn, title, stock, author, genre, summary, cover_url) VALUES (?, ?, ?, ?, ?, ?, ?)", 
                                        (row_isbn, new_title, 0, new_author, new_genre, new_summary, new_cover))
                         
-                        # 2. Update Stock (Add received qty)
                         db.execute("UPDATE books SET stock = stock + ? WHERE isbn = ?", (row['qty'], row_isbn))
                     
                     status_text.text("Done!")
